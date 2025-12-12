@@ -1,0 +1,63 @@
+plugins {
+	id 'java'
+	id 'org.springframework.boot' version '3.3.5'
+	id 'io.spring.dependency-management' version '1.1.6'
+}
+
+group = 'co.bebolder'
+
+// ✅ Obligamos a que `version` esté definida en gradle.properties
+if (!project.hasProperty('version')) {
+    throw new GradleException("La propiedad 'version' debe estar definida en gradle.properties")
+}
+
+def baseVersion = project.version  // Ahora se toma directamente de gradle.properties
+def env = project.hasProperty("env") ? project.getProperty("env") : "dev"
+
+def suffix = ""
+if (env == "dev") {
+    suffix = "-SNAPSHOT"
+} else if (env == "qa") {
+    suffix = "-PRERELEASE"
+}
+
+version = baseVersion + suffix
+
+java {
+	toolchain {
+		languageVersion = JavaLanguageVersion.of(17)
+	}
+}
+
+repositories {
+	mavenCentral()
+}
+
+dependencies {
+	implementation 'org.springframework.boot:spring-boot-starter-web'
+	testImplementation 'org.springframework.boot:spring-boot-starter-test'
+	testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+
+    implementation 'org.springframework.boot:spring-boot-starter-actuator'
+    implementation 'io.micrometer:micrometer-registry-prometheus'
+}
+
+tasks.named('test') {
+	useJUnitPlatform()
+}
+
+// ✅ Info del build para Spring Actuator u otros usos
+springBoot {
+    buildInfo {
+        properties {
+            name = project.findProperty("application_name") ?: "cinemaseats"
+            version = project.version
+        }
+    }
+}
+
+// ✅ Empaquetado del JAR con nombre coherente
+jar {
+    archiveBaseName.set("cinemaseats")
+    archiveVersion.set(version)
+}

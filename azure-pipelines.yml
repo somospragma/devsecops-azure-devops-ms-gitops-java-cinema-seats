@@ -1,0 +1,35 @@
+trigger:
+  branches:
+    include:
+      - develop
+      - main
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+   - name: BRANCH_NAME
+     value: $[replace(variables['Build.SourceBranch'], 'refs/heads/', '')]
+   - ${{ if or(eq(variables['Build.SourceBranch'], 'refs/heads/main'), eq(variables['Build.SourceBranch'], 'refs/heads/master')) }}:
+     - group: cinema-seats-pdn
+
+   - ${{ elseif or(eq(variables['Build.SourceBranch'], 'refs/heads/develop'), eq(variables['Build.SourceBranch'], 'refs/heads/desarrollo')) }}:
+     - group: cinema-seats-dev
+
+   - ${{ else }}:
+     - group: cinema-seats-dev
+
+# Repositorios a usar
+resources:
+  repositories:
+    - repository: Template
+      name: Inicio DevOps Johan/pipeline-templates
+      type: git
+    - repository: ManifestRepo
+      name: Inicio DevOps Johan/manifest-k8s
+      type: git
+stages:
+
+- template: Backend/gradle/pipeline.yml@Template
+- template: Reescribir/pipeline-helm.yml@Template
+

@@ -1,0 +1,220 @@
+image: gradle:jdk17
+
+variables:
+  GRADLE_USER_HOME: "$CI_PROJECT_DIR/.gradle"
+  GRADLE_OPTS: "-Dorg.gradle.daemon=true -Dorg.gradle.workers.max=2"
+  DOCKER_USERNAME: $DOCKER_USERNAME
+  DOCKER_PASSWORD: $DOCKER_PASSWORD
+  ENV: $ENV
+  GITOPS_REPO: "https://$GITOPS_USERNAME:$GITOPS_TOKEN@gitlab.com/be-bulder/gitops-infra.git"
+  GITOPS_BRANCH: ${CI_COMMIT_REF_NAME}
+  PROJECT_NAME: "cinema-seats"
+  PROJECT_ID_APPS: "69169423"
+
+before_script:
+  - export GRADLE_USER_HOME=`pwd`/.gradle
+  - chmod +x gradlew
+
+stages:
+  - continuous-integration   
+  - continuous-testing
+  - continuous-deployment
+
+# # 🔍 Validación de estilo
+# lint:
+#   stage: continuous-integration
+#   image:
+#     name: cytopia/yamllint
+#     entrypoint: [""]
+#   before_script: []
+#   script:
+#     - echo "Validando formato de YAML y configuraciones..."
+#     - yamllint .
+#   allow_failure: true
+#   only:
+#     - develop
+#     - qa
+#     - main
+
+# # 🕵️‍♂️ Escaneo de secretos
+# secret-scan:
+#   stage: continuous-integration
+#   image: zricethezav/gitleaks:v8.18.1
+#   before_script: []
+#   script:
+#     - echo "Escaneando secretos con Gitleaks..."
+#     - gitleaks detect --source . --no-git --redact --exit-code 0
+#   allow_failure: true
+#   needs:
+#     - lint
+#   only:
+#     - develop
+#     - qa
+#     - main
+
+# # 📦 Auditoría de dependencias
+# dependency-check:
+#   stage: continuous-integration
+#   image: owasp/dependency-check:latest
+#   before_script: []
+#   script:
+#     - echo "Escaneando dependencias con OWASP Dependency-Check..."
+#     - dependency-check.sh --scan . --format "HTML" --project "cinemaseats" --out dependency-report
+#   artifacts:
+#     paths:
+#       - dependency-report/
+#   allow_failure: true
+#   needs:
+#     - secret-scan
+#   only:
+#     - develop
+#     - qa
+#     - main   
+
+# 🧪 Pruebas unitarias
+test:
+  stage: continuous-integration
+  before_script: []
+  script:
+    - echo "🧪 Running tests..."
+    - ./gradlew test
+  allow_failure: true
+  # needs:
+  #   - dependency-check
+  only:
+    - develop
+    - qa
+    - main
+
+# # ✅ SonarQube (analisis coodigo estatico)######
+# quality-gate:
+#   stage: continuous-integration
+#   image: sonarsource/sonar-scanner-cli
+#   before_script: []
+#   script:
+#     - echo "🔍 Running SonarQube scan..."
+#     # - sonar-scanner -Dsonar.projectKey=cinemaseats \
+#     #                 -Dsonar.sources=. \
+#     #                 -Dsonar.host.url=$SONAR_HOST_URL \
+#     #                 -Dsonar.login=$SONAR_TOKEN
+#   dependencies:
+#     - test
+#   needs:
+#     - test
+#   only:
+#     - develop
+#     - qa
+#     - main
+
+build-artifact:
+  stage: continuous-integration
+  script:
+    - echo "🔧 Building the artifact for $ENV environment..."
+    - ./gradlew clean build -Penv=$ENV
+    - echo "📦 Artifact generado:"
+    - ls build/libs/ | grep -v plain
+  artifacts:
+    paths:
+      - build/libs/
+    exclude:
+      - build/libs/*plain*.jar
+  # needs:
+  #   - quality-gate
+  only:
+    - develop
+    - qa
+    - main
+
+push-image:
+  stage: continuous-integration
+  image: docker
+  services:
+    - docker:dind
+  script:
+    - echo "Authenticating with Docker Hub..."
+    - echo $DOCKER_PASSWORD | docker login -u $DOCKER_USERNAME --password-stdin
+    - echo "Building Docker image..."
+    - JAR_FILE=$(ls build/libs/ | grep -v plain | head -n 1)
+    - VERSION=$(echo $JAR_FILE | sed 's/^cinemaseats-//' | sed 's/.jar//')
+    - IMAGE_TAG="$DOCKER_USERNAME/$PROJECT_NAME:$VERSION"
+    - echo "Building image with tag:$IMAGE_TAG"
+    - docker build -t $IMAGE_TAG .
+    - docker tag $IMAGE_TAG $DOCKER_USERNAME/$PROJECT_NAME:latest
+    - echo "Pushing Docker image to Docker Hub..."
+    - docker push $IMAGE_TAG
+    - docker push $DOCKER_USERNAME/$PROJECT_NAME:latest
+    - echo "Saving version for next stage..."
+    - echo $VERSION > version.txt
+  artifacts:
+    paths:
+      - version.txt
+  dependencies:
+    - build-artifact
+  needs:
+    - build-artifact
+  only:
+    - develop
+    - qa
+    - main
+
+# # 🔐 Escaneo de seguridad docker (Trivy)
+security-scan:
+  stage: continuous-testing
+  image: ubuntu:latest  
+
+  before_script:
+    - apt-get update
+    - apt-get install -y wget gnupg lsb-release apt-transport-https curl
+    - curl -fsSL https://aquasecurity.github.io/trivy-repo/deb/public.key | gpg --dearmor -o /usr/share/keyrings/trivy-archive-keyring.gpg
+    - echo "deb [signed-by=/usr/share/keyrings/trivy-archive-keyring.gpg] https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | tee /etc/apt/sources.list.d/trivy.list
+    - apt-get update
+    - apt-get install -y trivy
+    - trivy --version  
+
+  script:
+    - echo "🔒 Ejecutando escaneo con Trivy..."
+    - JAR_FILE=$(ls build/libs/ | grep -v plain | head -n 1)
+    - VERSION_APP=$(echo $JAR_FILE | sed 's/^cinemaseats-//' | sed 's/.jar//')
+    - |
+      VERSION=$VERSION_APP
+      IMAGE_TAG="$DOCKER_USERNAME/$PROJECT_NAME:$VERSION"
+      echo "Escaneando la imagen: $IMAGE_TAG"
+      
+      if [[ "$CI_COMMIT_REF_NAME" == "main" ]]; then
+        trivy image --format table --severity HIGH,CRITICAL --exit-code 1 $IMAGE_TAG
+      else
+        trivy image --format table --severity HIGH,CRITICAL --exit-code 0 $IMAGE_TAG
+      fi
+  dependencies:
+     - build-artifact
+  needs:
+    - push-image
+    - build-artifact
+  only:
+    - develop
+    - qa
+    - main
+
+# disparar pipeline gitops chart helm
+# 🚀 GitOps trigger 
+trigger-gitops:
+  stage: continuous-deployment
+  image: curlimages/curl:latest
+  before_script: []
+  script:
+    - APPLICATION_VERSION=$(cat version.txt)
+    - echo "🔁 Triggering GitOps pipeline with VERSION=$APPLICATION_VERSION..."
+    - |
+      curl --request POST \
+           --form "token=$TRIGGER_TOKEN_GITOPS" \
+           --form "ref=${CI_COMMIT_REF_NAME}" \
+           --form "variables[PROJECT_NAME]=$PROJECT_NAME" \
+           --form "variables[APPLICATION_VERSION]=$APPLICATION_VERSION" \
+           "https://gitlab.com/api/v4/projects/$PROJECT_ID_APPS/trigger/pipeline"
+  dependencies:
+    - push-image
+  only:
+    - develop
+    - qa
+    - main
+
